@@ -29,6 +29,7 @@ class QCHTMLParser(HTMLParser):
 			"specialChar": "Found spcial character in the copy.",
 			"noHttp": "No http found at the begining of the url.",
 			"wrongConv": "Conversion detected but value invalided.",
+			"wrongEntity": "Wrong escaped character found",
 		}
 		#filter is used for some ET links
 		self.__filter = ["%%view_email_url%%", "%%ftaf_url%%", "%%=GetSocialPublishURL("]
@@ -48,7 +49,8 @@ class QCHTMLParser(HTMLParser):
 			"tel": 0,
 			"conversion": 0,
 		}
-		#signal used for catching title data
+		#signal used for catching title data, 
+		#I'm still looking into this issue, because if title is null, handle data won't be called
 		self.__signals = {
 			"title": 0,
 		}
@@ -59,6 +61,9 @@ class QCHTMLParser(HTMLParser):
 		mdash = unicode("—", encoding="utf-8")
 		#the characters will be put in to below list
 		self.__specialCharList = [trade, rball, cball, mdash]
+
+		#list for the escaped character, we can add what we want later
+		self.__entityRef = ["amp", "reg", "trade", "copy", "nbsp", "gt", "lt", "mdash", "ndash", "quot", "rdquo", "ldquo"]
 
 	#change the signal	
 	def __changeSignal(self, target, number):
@@ -227,6 +232,13 @@ class QCHTMLParser(HTMLParser):
 				self.__errInput(self.getpos(), "emptyValue", "title")
 		if data:
 			self.__hasSpecialChar(data)
+
+	#handle_entityref is used for handling escaped character like &amp &reg
+	#for now, if we missing semi-colon after the &amp or &reg etc. , we won't catch the missing semi-colon
+	#this could be fixed by modify the HTMLParser(Python built-in lib). Won't be difficult.
+	def handle_entityref(self, name):
+		if not any(x == name for x in self.__entityRef):
+			self.__errInput(self.getpos(), "wrongEntity")
 
 	##overwrite the original method which will convert the escaped character in the alt attr
 	def unescape(self, s):
