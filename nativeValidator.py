@@ -4,6 +4,8 @@ from bs4 import UnicodeDammit #this is a python lib we should install called Bea
 from HTMLParser import HTMLParser
 from urlparse import urlparse
 
+#Beautiful Soup could be found here http://www.crummy.com/software/BeautifulSoup/bs4/doc/#installing-a-parser
+
 #decode_html function is used for correct decode our html file
 #if the input is already unicode string, we don't have to use beautiful soup to decode the html
 #If we can easily decode the code to "utf-8", we don't need to use Beautiful Soup also.
