@@ -3,6 +3,7 @@
 from bs4 import UnicodeDammit #this is a python lib we should install called BeautifulSoup
 from HTMLParser import HTMLParser
 from urlparse import urlparse
+from htmlentitydefs import entitydefs
 
 #Beautiful Soup could be found here http://www.crummy.com/software/BeautifulSoup/bs4/doc/#installing-a-parser
 
@@ -54,7 +55,8 @@ class QCHTMLParser(HTMLParser):
 		#signal used for catching title data, 
 		#I'm still looking into this issue, because if title is null, handle data won't be called
 		self.__signals = {
-			"title": 0,
+			"title": 0, # 0=Unreached, 1=Reached, 2=DataFound
+			"style-end": 0, # 0=Unreached, 1=Reached
 		}
 		#below is the special characters used for mathing
 		trade = unicode("™", encoding="utf-8")
@@ -227,19 +229,28 @@ class QCHTMLParser(HTMLParser):
 
 	def handle_endtag(self, tag):
 		if tag == "title":
+			if self.__signals["title"] == 1:
+				#if not 2, means not data found. So report error
+				self.__errInput(self.getpos(), "emptyValue", "title")
 			self.__changeSignal("title", 0)
+		if tag == "style":
+			self.__changeSignal("style-end", 1)
+		if tag == "head":
+			self.__changeSignal("style-end", 0)
 	def handle_data(self,data):
 		if self.__signals["title"] == 1:
-			if not data:
-				self.__errInput(self.getpos(), "emptyValue", "title")
+			self.__changeSignal('title', 2)
 		if data:
 			self.__hasSpecialChar(data)
+		if self.__signals["style-end"] == 1:
+			#we can get the AMP Script
+			print data
 
 	#handle_entityref is used for handling escaped character like &amp &reg
 	#for now, if we missing semi-colon after the &amp or &reg etc. , we won't catch the missing semi-colon
 	#this could be fixed by modify the HTMLParser(Python built-in lib). Won't be difficult.
 	def handle_entityref(self, name):
-		if not any(x == name for x in self.__entityRef):
+		if not entitydefs.get(name):
 			self.__errInput(self.getpos(), "wrongEntity")
 
 	##overwrite the original method which will convert the escaped character in the alt attr
