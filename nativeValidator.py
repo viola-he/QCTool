@@ -1,23 +1,18 @@
-#!/usr/bin/python2.4
+#!/usr/bin/python2.7
 # -*- coding: utf-8 -*-
 from bs4 import UnicodeDammit #this is a python lib we should install called BeautifulSoup
 from HTMLParser import HTMLParser
 from urlparse import urlparse
 from htmlentitydefs import entitydefs
+import re, codecs
 
 #Beautiful Soup could be found here http://www.crummy.com/software/BeautifulSoup/bs4/doc/#installing-a-parser
 
-#decode_html function is used for correct decode our html file
-#if the input is already unicode string, we don't have to use beautiful soup to decode the html
-#If we can easily decode the code to "utf-8", we don't need to use Beautiful Soup also.
-def decode_html(html_string):
-	new_doc = UnicodeDammit.detwingle(html_string)
-	return new_doc.decode("utf-8")
-
 class QCHTMLParser(HTMLParser):
-	def __init__(self):
+	def __init__(self, data):
 		HTMLParser.__init__(self)
-		self.__errMsg = {
+		self.source = self.decode_html(data)
+		self.errMsg = {
 			#dictionary for errors. Output metthod will use the "key" to get the "value" to output the error.
 			"invalidImage": "The dimension of the image is invalided.",
 			"replaceLink": "Word \"replace\" found in link.",
@@ -33,17 +28,20 @@ class QCHTMLParser(HTMLParser):
 			"noHttp": "No http found at the begining of the url.",
 			"wrongConv": "Conversion detected but value invalided.",
 			"wrongEntity": "Wrong escaped character found",
+			"duplicatedAlias": "Found alias duplicated with former alias",
+			"over500": "line over 500",
 		}
 		#filter is used for some ET links
-		self.__filter = ["%%view_email_url%%", "%%ftaf_url%%", "%%=GetSocialPublishURL("]
+		self.filter = ["%%view_email_url%%", "%%ftaf_url%%", "%%=GetSocialPublishURL("]
 		#alias dict is used for counting alias, Key=AliasName Value=Times
-		self.__aliasDict = {}
+		self.aliasDict = {}
 		#alias List is used for alias & rawlink pairs		
-		self.__aliasList = []
+		self.aliasList = []
 		#each error will be append to this list
-		self.__errors = []
+		self.errors = []
 		#dict used for counting, notice "plain_link" refers to the aTag which has href
-		self.__aCount = {
+		self.aCount = {
+			"view_email": 0,
 			"plain_link": 0,
 			"empty_link": 0,
 			"alias": 0,
@@ -52,9 +50,10 @@ class QCHTMLParser(HTMLParser):
 			"tel": 0,
 			"conversion": 0,
 		}
+		self.sline = ""
 		#signal used for catching title data, 
 		#I'm still looking into this issue, because if title is null, handle data won't be called
-		self.__signals = {
+		self.signals = {
 			"title": 0, # 0=Unreached, 1=Reached, 2=DataFound
 			"style-end": 0, # 0=Unreached, 1=Reached
 		}
@@ -64,122 +63,142 @@ class QCHTMLParser(HTMLParser):
 		cball = unicode("©", encoding='utf-8')
 		mdash = unicode("—", encoding="utf-8")
 		#the characters will be put in to below list
-		self.__specialCharList = [trade, rball, cball, mdash]
+		self.specialCharList = [trade, rball, cball, mdash]
+	def run(self):
+		self.check500Chars()
+		self.feed(self.source)
 
-		#list for the escaped character, we can add what we want later
-		self.__entityRef = ["amp", "reg", "trade", "copy", "nbsp", "gt", "lt", "mdash", "ndash", "quot", "rdquo", "ldquo"]
+	#decode_html function is used for correct decode our html file
+	#if the input is already unicode string, we don't have to use beautiful soup to decode the html
+	#If we can easily decode the code to "utf-8", we don't need to use Beautiful Soup also.
+	def decode_html(self, html_string):
+		new_doc = UnicodeDammit.detwingle(html_string)
+		return new_doc.decode("utf-8")
 
 	#change the signal	
-	def __changeSignal(self, target, number):
-		self.__signals[target] = number;
+	def changeSignal(self, target, number):
+		self.signals[target] = number;
 
 	#input error to the list, param "name" used to indicate the specific wrong attr
-	def __errInput(self, position, errMsg, name=None):
-		self.__errors.append([position[0], position[1], errMsg, name])
+	def errInput(self, position, errMsg, name=None):
+		self.errors.append([position[0], position[1], errMsg, name])
 
 	#if image don't have either width or height, or both are 0 then it will be reported
 	#this may need further discussion, but now it is still working
-	def __invalidImage(self, width, height):
+	def invalidImage(self, width, height):
 		if width and height:
 			if width == "0" and height == "0":
-				self.__errInput(self.getpos(), "invalidImage")
+				self.errInput(self.getpos(), "invalidImage")
 		else: 
-			self.__errInput(self.getpos(), "invalidImage")
+			self.errInput(self.getpos(), "invalidImage")
 
 	#if alias is not found in dict's key, then create one otherwise add 1
-	def __isAliasDuplicated(self, alias):
-		if self.__aliasDict.has_key(alias):
-			self.__aliasDict[alias] += 1
-			return True
-		else: 
-			self.__aliasDict[alias] = 1
-			return False
+	def isAliasDuplicated(self, alias):
+		bObj = False
+		for item in alias:
+			if self.aliasDict.has_key(item):
+				self.aliasDict[item] += 1
+				bObj = True
+			else: 
+				self.aliasDict[item] = 1
+		return bObj
 
 	#the logic is a little confused but it use "urlparse", so check the document
-	def __urlValidation(self, url):
-		if any(url.startswith(x) for x in self.__filter):
+	def urlValidation(self, url):
+		if any(url.startswith(x) for x in self.filter):
 			return
 		if "replace" in url.lower():
-			self.__errInput(self.getpos(), "replaceLink")	
+			self.errInput(self.getpos(), "replaceLink")	
 		else:
 			o = urlparse(url)
 			if not any(x == o.scheme for x in ["mailto", "tel"]):
 				if not o.scheme and " http" in o.path:
-					self.__errInput(self.getpos(), "spaceLink")
+					self.errInput(self.getpos(), "spaceLink")
 				if not o.scheme and not o.netloc:
-					self.__errInput(self.getpos(), "noHttp")
+					self.errInput(self.getpos(), "noHttp")
 				if not ".com" in o.netloc and not o.netloc.startswith("http"):
-					self.__errInput(self.getpos(), "noDotCom")
+					self.errInput(self.getpos(), "noDotCom")
 				if "http:" in o.netloc and "http" in o.scheme:
-					self.__errInput(self.getpos(), "doubleHttp")
+					self.errInput(self.getpos(), "doubleHttp")
 				if not o.query and "&" in o.path:
-					self.__errInput(self.getpos(), "noQuestionMark")
+					self.errInput(self.getpos(), "noQuestionMark")
 				if any(x in o.fragment for x in ["?", "&"]):
-					self.__errInput(self.getpos(), "wrongFragment")
+					self.errInput(self.getpos(), "wrongFragment")
 
 	#using urlparse to get the scheme of a url
-	def __getUrlScheme(self, url):
+	def getUrlScheme(self, url):
 		o = urlparse(url)
 		return o.scheme
 
 	#check if alias contain return
-	def __hasReturn(self, alias):
-		if "\n" in alias:
-			self.__errInput(self.getpos(), "returnInAlias")
+	def hasReturn(self, alias):
+		for item in alias:
+			if "\n" in item:
+				self.errInput(self.getpos(), "returnInAlias")
 
 	#check if has special char
-	def __hasSpecialChar(self, content):
-		if any(x in content for x in self.__specialCharList):
-			self.__errInput(self.getpos(), "specialChar")
+	def hasSpecialChar(self, content):
+		if any(x in content for x in self.specialCharList):
+			self.errInput(self.getpos(), "specialChar")
 
 	#only equal true then it will pass the validation
-	def __convValidation(self, value):
+	def convValidation(self, value):
 		if value.lower() == "true":
 			return True
 		return False
 
 	#login the data to alias list
-	def __aliasInput(self, alias, rawlink, conversion):
-		isDuplicated = self.__isAliasDuplicated(alias)
+	def aliasInput(self, alias, rawlink, conversion):
+		isDuplicated = self.isAliasDuplicated(alias)
 		if conversion or conversion == "":
-			hasConversion = self.__convValidation(conversion)
+			hasConversion = self.convValidation(conversion)
 			if not hasConversion:
 				hasConversion = "invalid"
-				self.__errInput(self.getpos(), "wrongConv")
+				self.errInput(self.getpos(), "wrongConv")
 		else: hasConversion = False
 		if not alias:
-			alias = "None/Empty"
+			aliasStr = "None/Empty"
+		else:
+			aliasStr = "|".join(alias)
 		if not rawlink:
 			rawlink = "None/Empty"
 		hasConversion = str(hasConversion)
 		isDuplicated = str(isDuplicated)
-		self.__aliasList.append([alias, rawlink, hasConversion, isDuplicated])
+		self.aliasList.append([aliasStr, rawlink, hasConversion, isDuplicated])
 
 	#count the number of the link
 	#if we can't get an attr, we will get None
-	def __count(self, alias, link, conversion):
-		scheme = self.__getUrlScheme(link)
+	def count(self, alias, link, conversion):
+		scheme = self.getUrlScheme(link)
 		if link is None:
-			self.__errInput(self.getpos(), "noAttr", "href")
+			self.errInput(self.getpos(), "noAttr", "href")
 		else:
-			self.__aCount["plain_link"] += 1
+			self.aCount["plain_link"] += 1
 			if link:
 				if scheme == "tel":
-					self.__aCount["tel"] += 1
+					self.aCount["tel"] += 1
 				elif scheme == "mailto":
-					self.__aCount["mail"] += 1
+					self.aCount["mail"] += 1
+				elif link == "%%view_email_url%%":
+					self.aCount["view_email"] += 1
 			else:
-				self.__errInput(self.getpos(), "emptyValue", "href")
-				self.__aCount["empty_link"] += 1
-		if alias is None and scheme != "tel" and scheme != "mailto":
-			self.__errInput(self.getpos(), "noAttr", "alias")
-		elif alias and scheme != "tel" and scheme != "mailto":
-			self.__aCount["alias"] += 1
-		elif alias == "":
-			self.__aCount["empty_alias"] += 1
-			self.__errInput(self.getpos(), "emptyValue", "alias")
+				self.errInput(self.getpos(), "emptyValue", "href")
+				self.aCount["empty_link"] += 1
+		if len(alias) == 0 and scheme != "tel" and scheme != "mailto":
+			self.errInput(self.getpos(), "noAttr", "alias")
+		elif alias[0] and scheme != "tel" and scheme != "mailto":
+			self.aCount["alias"] += 1
+		elif any(x == "" for x in alias):
+			self.aCount["empty_alias"] += 1
+			self.errInput(self.getpos(), "emptyValue", "alias")
 		if conversion or conversion == "":
-			self.__aCount["conversion"] += 1
+			self.aCount["conversion"] += 1
+
+	def check500Chars(self):
+		source = self.source.split('\n')
+		for lineno, line in enumerate(source):
+			if len(line)>500:
+				self.errInput([lineno, 0], "over500")
 	
 	#while img tag detected, pass it to this method
 	def imageCheck(self, attrs):
@@ -193,30 +212,39 @@ class QCHTMLParser(HTMLParser):
 				height = item[1]
 			if item[0] == "alt":
 				alt = item[1]
-		self.__invalidImage(width, height)
+		self.invalidImage(width, height)
 		if alt:
-			self.__hasSpecialChar(alt)
+			self.hasSpecialChar(alt)
+
+	#using re to grab the subjectline -- need further test
+	def get_sline(self, text):
+		regex = re.compile(r'set\s@subjectline\s?=\s?"([^"\\]*(?:\\.[^"\\]*)*)"', re.IGNORECASE)
+		match = regex.search(text)
+		if match:
+			return match.group(1)
+		else:
+			return match
 
 	#while a tag detected, pass it to this method
 	def aTagCheck(self, attrs):
 		link = None
-		alias = None
+		alias = []
 		conversion = None
 		for item in attrs:
 			if item[0] == "href":
 				link = item[1]
 			if item[0] == "alias":
-				alias = item[1]
+				alias.append(item[1])
 			if item[0] == "conversion":
 				conversion = item[1]
-		self.__aliasInput(alias, link, conversion)
-		self.__count(alias, link, conversion)
-		#it's quite confusion here, the empty validation is done in __count method
+		self.aliasInput(alias, link, conversion)
+		self.count(alias, link, conversion)
+		#it's quite confusion here, the empty validation is done in count method
 		#maybe we can move that out here
 		if link:
-			self.__urlValidation(link)
-		if alias:
-			self.__hasReturn(alias)
+			self.urlValidation(link)
+		if len(alias) != 0:
+			self.hasReturn(alias)
 
 	#handle_xxxxx overwrite the blank method in the HTMLParser
 	def handle_starttag(self, tag, attrs):
@@ -225,55 +253,62 @@ class QCHTMLParser(HTMLParser):
 		elif tag == "a":
 			self.aTagCheck(attrs)
 		elif tag == "title":
-			self.__changeSignal("title", 1)
+			self.changeSignal("title", 1)
 
 	def handle_endtag(self, tag):
 		if tag == "title":
-			if self.__signals["title"] == 1:
+			if self.signals["title"] == 1:
 				#if not 2, means not data found. So report error
-				self.__errInput(self.getpos(), "emptyValue", "title")
-			self.__changeSignal("title", 0)
+				self.errInput(self.getpos(), "emptyValue", "title")
+			self.changeSignal("title", 0)
 		if tag == "style":
-			self.__changeSignal("style-end", 1)
+			self.changeSignal("style-end", 1)
 		if tag == "head":
-			self.__changeSignal("style-end", 0)
+			self.changeSignal("style-end", 0)
 	def handle_data(self,data):
-		if self.__signals["title"] == 1:
-			self.__changeSignal('title', 2)
+		if self.signals["title"] == 1:
+			self.changeSignal('title', 2)
 		if data:
-			self.__hasSpecialChar(data)
-		if self.__signals["style-end"] == 1:
+			self.hasSpecialChar(data)
+		if self.signals["style-end"] == 1:
 			#we can get the AMP Script
-			print data
+			sline = self.get_sline(data)
+			if sline: 
+				self.sline = sline
 
 	#handle_entityref is used for handling escaped character like &amp &reg
 	#for now, if we missing semi-colon after the &amp or &reg etc. , we won't catch the missing semi-colon
 	#this could be fixed by modify the HTMLParser(Python built-in lib). Won't be difficult.
 	def handle_entityref(self, name):
 		if not entitydefs.get(name):
-			self.__errInput(self.getpos(), "wrongEntity")
+			self.errInput(self.getpos(), "wrongEntity")
 
 	##overwrite the original method which will convert the escaped character in the alt attr
 	def unescape(self, s):
 		return s
 	#output all the errors
-	def output(self, filename):
-		outFile = open(filename, "w")
+	def outputToFile(self, filename):
+		outFile = codecs.open(filename, "w", "utf-8")
+		#output the sline
+		outFile.write("\n"*2 + "The subjectline in AMPScript is:\n")
+		outFile.write("*"*50 + "\n"*2)
+		outFile.write(self.sline + "\n"*2)
+		outFile.write("*"*50 + "\n"*2)
 		#output the error pool
 		outFile.write("\n"*2 + "*"*50 + "\n"*2)
 		outFile.write("Outputing Errors......\n\n")
 		outFile.write("*"*50 + "\n"*2)
-		for error in self.__errors:
+		for error in self.errors:
 			if not error[-1]:
 				error[-1] = ""
-			outputStr = "Line: " + str(error[0]) + " Offset: " + str(error[1]) + " Error Message: " + self.__errMsg[error[2]] + error[3] + "\n"
+			outputStr = "Line: " + str(error[0]) + " Offset: " + str(error[1]) + " Error Message: " + self.errMsg[error[2]] + error[3] + "\n"
 			outFile.write(outputStr)
 		# output the alias couting problems
 		outputStr = "" 
 		duplicatedones = []
-		for key in self.__aliasDict:
-			outputStr += str(key) + "\t" + str(self.__aliasDict[key]) + "\n"
-			if self.__aliasDict[key] >1:
+		for key in self.aliasDict:
+			outputStr += str(key) + "\t" + str(self.aliasDict[key]) + "\n"
+			if self.aliasDict[key] >1:
 				duplicatedones.append(str(key))
 		outFile.write("\n"*2 + "*"*50 + "\n"*2)
 		outFile.write("Outputing Alias Duplicated times, if number equals 1, then means it's not duplicated.\n\n")
@@ -285,20 +320,14 @@ class QCHTMLParser(HTMLParser):
 		outFile.write("\n"*2 + "*"*50 + "\n"*2)
 		outFile.write("Outputing the counts of the a tags\n\n")
 		outFile.write("*"*50 + "\n"*2)
-		for key in self.__aCount:
-			outFile.write(str(key) + " : " + str(self.__aCount[key]) + "\n")
+		for key in self.aCount:
+			outFile.write(str(key) + " : " + str(self.aCount[key]) + "\n")
 		# output the alias rawlink pairs
 		outFile.write("\n"*2 + "*"*50 + "\n"*2)
 		outFile.write("Outputing Alias , Rawlinks combination...\n\n")
 		outFile.write("*"*50 + "\n"*2)
 		outFile.write("Alias Name\tRaw Links\tConversion\tisDuplicated\n\n")
-		for alias in self.__aliasList:
+		for alias in self.aliasList:
 			outputStr = "\t".join(alias) + "\n"
 			outFile.write(outputStr)
 		outFile.close()
-
-
-fileHTML = open("EMail/content.html").read()
-parser = QCHTMLParser()
-parser.feed(decode_html(fileHTML))
-parser.output("result.txt")
